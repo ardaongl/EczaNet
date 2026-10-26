@@ -1,0 +1,112 @@
+name: eczanet
+x-app: &app
+  image: eczanet-app:a1
+  build: .
+  environment: &environment
+    DATABASE_URL: postgres://eczanet_runtime:${RUNTIME_PASSWORD:?copy .env.example to .env}@db:5432/eczanet_demo?sslmode=disable
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?required}
+    COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    HTTP_TIMEOUT: ${HTTP_TIMEOUT:-15s}
+    STOCK_LOCK_TIMEOUT: ${STOCK_LOCK_TIMEOUT:-2s}
+    STOCK_STATEMENT_TIMEOUT: ${STOCK_STATEMENT_TIMEOUT:-5s}
+    SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
+    DB_POOL_MAX: ${DB_POOL_MAX:-10}
+services:
+  db:
+    image: postgres:16.15-alpine3.23
+    user: "70:70"
+    environment:
+      POSTGRES_USER: eczanet_owner
+      POSTGRES_DB: eczanet_demo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      RUNTIME_PASSWORD: ${RUNTIME_PASSWORD:?required}
+      MIGRATOR_PASSWORD: ${MIGRATOR_PASSWORD:?required}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U eczanet_owner -d eczanet_demo"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+  migrate-seed:
+    <<: *app
+    command: [/app/seed]
+    environment:
+      DATABASE_URL: postgres://eczanet_migrator:${MIGRATOR_PASSWORD:?required}@db:5432/eczanet_demo?sslmode=disable
+      DEMO_PASSWORD: ${DEMO_PASSWORD:?required}
+      DEMO_DATE: ${DEMO_DATE:?required}
+      DEMO_SEED: ${DEMO_SEED:?required}
+      DEMO_FULL_SEED: ${DEMO_FULL_SEED:-false}
+    depends_on:
+      db: {condition: service_healthy}
+  api:
+    <<: *app
+    container_name: ddo-orman-api
+    ports: ["8080:8080"]
+    depends_on:
+      migrate-seed: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, /app/api, probe]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+    stop_grace_period: 15s
+  web:
+    image: eczanet-web:a1
+    build: ./web
+    ports: ["3000:3000"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:3000/]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+  simulator:
+    <<: *app
+    command: [/app/simulator]
+    environment:
+      SIMULATOR_ENABLED: ${SIMULATOR_ENABLED:-false}
+      API_URL: http://api:8080
+      REQUEST_ORIGIN: http://localhost:8080
+      DEMO_PASSWORD: ${DEMO_PASSWORD:?required}
+      DEMO_DATE: ${DEMO_DATE:?required}
+      DEMO_SEED: ${DEMO_SEED:?required}
+      SIMULATOR_SPEED: ${SIMULATOR_SPEED:-1}
+    volumes:
+      - simulator-state:/state
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, /app/simulator, probe]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+  verify:
+    <<: *app
+    profiles: [verify]
+    command: [/app/verify]
+    environment:
+      API_URL: http://api:8080
+      REQUEST_ORIGIN: http://localhost:8080
+      DEMO_PASSWORD: ${DEMO_PASSWORD:?required}
+      VERIFY_DATABASE_URL: postgres://eczanet_runtime:${RUNTIME_PASSWORD:?required}@db:5432/eczanet_demo?sslmode=disable
+    depends_on:
+      api: {condition: service_healthy}
+  tools:
+    image: eczanet-tools:a1
+    build: {context: ., target: tools}
+    profiles: [tools]
+    working_dir: /src
+    command: [go, test, ./...]
+    environment:
+      TEST_DATABASE_URL: postgres://eczanet_migrator:${MIGRATOR_PASSWORD:?required}@db:5432/eczanet_demo?sslmode=disable
+      TEST_RUNTIME_URL: postgres://eczanet_runtime:${RUNTIME_PASSWORD:?required}@db:5432/eczanet_demo?sslmode=disable
+      DEMO_PASSWORD: ${DEMO_PASSWORD:?required}
+    depends_on:
+      api: {condition: service_healthy}
+volumes:
+  db-data:
+  simulator-state:

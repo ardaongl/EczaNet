@@ -1,0 +1,11 @@
+.git
+.env
+.internal
+artifacts
+**/node_modules
+**/dist
+bin
+**/test-results
+**/__pycache__
+**/*.pyc
+**/coverage.out
