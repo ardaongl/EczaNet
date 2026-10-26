@@ -113,4 +113,8 @@ GitHub Actions; container build, tam doğrulama, PostgreSQL entegrasyon testleri
 
 Daha fazla komut ve beklenen sonuç için [TESTING.md](TESTING.md) dosyasına bakın.
 
+## Lisans
+
+Bu proje [MIT Lisansı](LICENSE) ile lisanslanmıştır.
+
 DDO Case Kodu: YILDIZ-a33906
