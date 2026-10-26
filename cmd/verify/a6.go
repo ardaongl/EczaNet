@@ -25,7 +25,9 @@ func (v *runner) runFullT5() {
 	fmt.Printf("PASS T-5 full100000 calculation_commit_ms=%.3f preparation_ms=%v (A5 cold+5warm evidence separate)\n", elapsed+w.commitMS, r["preparation_ms"])
 }
 func (v *runner) runInvariants() {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// The full reconciliation scans the 270k-sale seed. Keep this sub-budget
+	// below the 15-minute verify contract while allowing slower CI runners.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	dsn := os.Getenv("VERIFY_DATABASE_URL")
 	if dsn == "" {

@@ -36,10 +36,11 @@ func Check(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("invariant SQL catalog mismatch")
 	}
 	matches = append(matches, []string{"", a6})
-	for _, match := range matches {
+	groups := []string{"a3", "a4-stock", "a4-procurement", "a6-seed"}
+	for i, match := range matches {
 		rows, e := tx.Query(ctx, match[1])
 		if e != nil {
-			return e
+			return fmt.Errorf("%s invariants: %w", groups[i], e)
 		}
 		for rows.Next() {
 			var name string
@@ -56,7 +57,7 @@ func Check(ctx context.Context, conn *pgx.Conn) error {
 		e = rows.Err()
 		rows.Close()
 		if e != nil {
-			return e
+			return fmt.Errorf("%s invariants: %w", groups[i], e)
 		}
 	}
 	return tx.Commit(ctx)
