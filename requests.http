@@ -1,0 +1,649 @@
+@base = http://localhost:8080
+@origin = http://localhost:8080
+@password = Demo-EczaNet-2026!
+@barcode = 0012345678901
+@asOf = 2026-10-26
+@suggestionId = 1
+@allocationId = 1
+# Replace suggestionId/allocationId with IDs returned by the preceding calculate/order calls.
+
+### Readiness (DB included)
+GET {{base}}/health
+
+### Liveness
+GET {{base}}/_hz/a339
+
+### Technical Prometheus metrics; local demo public
+GET {{base}}/metrics
+
+### 1. CSRF preparation (REST Client must retain response cookies)
+# @name prepare
+GET {{base}}/api/v1/auth/csrf
+
+### 2. Login with prelogin cookie from prepare
+# @name login
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{prepare.response.body.$.csrf_token}}
+
+{"email":"seed.yildiz@ddo-case.invalid","password":"{{password}}"}
+
+### 3. Current account
+GET {{base}}/api/v1/auth/me
+
+### Assigned locations
+GET {{base}}/api/v1/auth/locations
+
+### Allowed scoped read
+GET {{base}}/api/v1/locations/1
+
+### Foreign scope must return 403
+GET {{base}}/api/v1/locations/2
+
+### 4. Logout with session-bound CSRF returned by login
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{login.response.body.$.csrf_token}}
+
+### 5. Must now return 401
+GET {{base}}/api/v1/auth/me
+
+### A2 manual journey. Change @run for each new intention; keep it on retries.
+@run = manual-a2-001
+
+### Warehouse CSRF after previous logout
+# @name warehousePrep
+GET {{base}}/api/v1/auth/csrf
+
+### Warehouse login
+# @name warehouseLogin
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{warehousePrep.response.body.$.csrf_token}}
+
+{"email":"depo@ddo-case.invalid","password":"{{password}}"}
+
+### Suppliers
+GET {{base}}/api/v1/suppliers?limit=50
+
+### Targets (warehouse only)
+GET {{base}}/api/v1/transfer-targets?limit=50
+
+### Create product. Replace barcode if already used by another intention.
+# @name product
+POST {{base}}/api/v1/products
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{warehouseLogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-product
+
+{"location_id":"21","product":{"barcode":"{{barcode}}","name":"MANUAL BASIC-TAB","dose":"5 mg","form":"tablet","base_unit":"tablet","pack_size":"10","blister_size":"5","sale_multiple":"1","ingredients":["demo"],"pack_price":"1000"}}
+
+### Catalog search; use next_cursor from response for next page. Scope changes ->400.
+GET {{base}}/api/v1/products?q={{barcode}}&limit=50
+
+### Receive 10 base units. Same supplier/document with new key still one receipt.
+# @name receipt
+POST {{base}}/api/v1/goods-receipts
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{warehouseLogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-receipt
+
+{"location_id":"21","supplier_id":"1","document_no":"{{run}}","reason":"Siparissiz demo kabul","lines":[{"product_id":"{{product.response.body.$.id}}","lot":"E","expires_on":"2099-12-31","quantity":"10"}]}
+
+### Warehouse lot/account balances
+GET {{base}}/api/v1/inventory?location_id=21&limit=50
+
+### Draft transfer 6 units
+# @name transfer
+POST {{base}}/api/v1/transfers
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{warehouseLogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-transfer
+
+{"location_id":"21","target_id":"1","items":[{"product_id":"{{product.response.body.$.id}}","quantity":"6","unit":"unit"}]}
+
+### Send: source4 / transit6 / target0
+POST {{base}}/api/v1/transfers/{{transfer.response.body.$.id}}/send
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{warehouseLogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-send
+
+{"location_id":"21"}
+
+### Warehouse transfer list
+GET {{base}}/api/v1/transfers?location_id=21&limit=50
+
+### Logout warehouse
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{warehouseLogin.response.body.$.csrf_token}}
+
+### Pharmacist CSRF
+# @name pharmacistPrep
+GET {{base}}/api/v1/auth/csrf
+
+### Pharmacist login
+# @name pharmacistLogin
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{pharmacistPrep.response.body.$.csrf_token}}
+
+{"email":"seed.yildiz@ddo-case.invalid","password":"{{password}}"}
+
+### Receive all remaining healthy units; A4 partial/damaged delivery examples are below
+POST {{base}}/api/v1/transfers/{{transfer.response.body.$.id}}/receive
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{pharmacistLogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-receive
+
+{"location_id":"1"}
+
+### Quote: no reservation, no Idempotency-Key needed
+# @name quote
+POST {{base}}/api/v1/sales/quote
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{pharmacistLogin.response.body.$.csrf_token}}
+
+{"location_id":"1","items":[{"product_id":"{{product.response.body.$.id}}","quantity":"2","unit":"unit"}]}
+
+### Commit: expected200 kurus. Replay same key/body on lost response; never a new key.
+# @name sale
+POST {{base}}/api/v1/sales
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{pharmacistLogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-sale
+
+{"location_id":"1","items":[{"product_id":"{{product.response.body.$.id}}","quantity":"2","unit":"unit"}],"quote":"{{quote.response.body.$.quote}}"}
+
+### Branch balance4
+GET {{base}}/api/v1/inventory?location_id=1&limit=50
+
+### Branch ledger
+GET {{base}}/api/v1/inventory/movements?location_id=1&limit=50
+
+### Sales and snapshots
+GET {{base}}/api/v1/sales?location_id=1&limit=50
+
+### Sale detail; foreign branch403
+GET {{base}}/api/v1/sales/{{sale.response.body.$.id}}
+
+### Disable product (run with fresh WAREHOUSE session/CSRF; pharmacist403)
+POST {{base}}/api/v1/products/{{product.response.body.$.id}}/disable
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{pharmacistLogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-disable
+
+{"location_id":"21"}
+
+### Logout pharmacist
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{pharmacistLogin.response.body.$.csrf_token}}
+
+### A3: fresh pharmacist login/CSRF after the previous logout
+# @name a3csrf
+GET {{base}}/api/v1/auth/csrf
+Origin: {{origin}}
+
+###
+# @name a3login
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{a3csrf.response.body.$.csrf_token}}
+
+{"email":"seed.yildiz@ddo-case.invalid","password":"{{password}}"}
+
+### A3 seed prescribed30 product; unique barcode lookup
+# @name a3product
+GET {{base}}/api/v1/products?q=000339060302&limit=50
+
+### A3 equivalents; follow next_cursor if nonempty
+GET {{base}}/api/v1/products/{{a3product.response.body.$.items[0].id}}/equivalents?limit=200
+
+### A3 demo import. Replace issued_at with a current past instant when exercising after 2026-10-31.
+# @name a3rx
+POST {{base}}/api/v1/prescriptions
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{a3login.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a3-rx
+
+{"location_id":"1","prescription":{"external_id":"{{run}}-RX30","patient_external_id":"{{run}}-H1","birth_date":"1990-01-01","issued_at":"2026-10-24T12:00:00Z","lines":[{"prescribed_product_id":"{{a3product.response.body.$.items[0].id}}","prescribed_base":"30"}]}}
+
+### A3 RX lookup; no ownership on read/import
+GET {{base}}/api/v1/prescriptions?location_id=1&q={{run}}-RX30&limit=50
+
+### A3 RX quote (technician may also prepare; no stock reserved)
+# @name a3quote
+POST {{base}}/api/v1/sales/quote
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{a3login.response.body.$.csrf_token}}
+
+{"location_id":"1","prescription_id":"{{a3rx.response.body.$.id}}","dispense":[{"prescription_line_id":"{{a3rx.response.body.$.lines[0].id}}","dispensed_product_id":"{{a3product.response.body.$.items[0].id}}","quantity":"10","unit":"unit"}]}
+
+### A3 commit. On uncertain result retain exact key/body; on PRICE_CHANGED explicitly approve a new quote/new intent key.
+# @name a3sale
+POST {{base}}/api/v1/sales
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{a3login.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a3-sale
+
+{"location_id":"1","prescription_id":"{{a3rx.response.body.$.id}}","dispense":[{"prescription_line_id":"{{a3rx.response.body.$.lines[0].id}}","dispensed_product_id":"{{a3product.response.body.$.items[0].id}}","quantity":"10","unit":"unit"}],"quote":"{{a3quote.response.body.$.quote}}","payment_method":"cash"}
+
+### A3 immutable sale snapshot
+GET {{base}}/api/v1/sales/{{a3sale.response.body.$.id}}
+
+### A3 controlled ledger (pharmacist/manager assigned branch; technician403)
+GET {{base}}/api/v1/controlled-ledger?location_id=1&limit=50
+
+### A3 switch to accountant for the price commands below
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{a3login.response.body.$.csrf_token}}
+
+###
+# @name a3accountcsrf
+GET {{base}}/api/v1/auth/csrf
+Origin: {{origin}}
+
+###
+# @name a3accountlogin
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{a3accountcsrf.response.body.$.csrf_token}}
+
+{"email":"muhasebe@ddo-case.invalid","password":"{{password}}"}
+
+### A3 price list (requires a fresh ACCOUNTANT session, otherwise403)
+GET {{base}}/api/v1/prices?limit=50
+
+### A3 schedule price (ACCOUNTANT current CSRF required; pharmacist403). Change the selected future timestamp as needed.
+POST {{base}}/api/v1/prices
+Origin: {{origin}}
+Content-Type: application/json
+X-CSRF-Token: {{a3accountlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a3-future-price
+
+{"location_id":"1","price":{"product_id":"{{a3product.response.body.$.items[0].id}}","valid_from":"2090-01-01T00:00:00Z","pack_price":"30000"}}
+
+
+### A4 checkpoint. These examples need your real fixture IDs; never use3916.
+# After the earlier accountant block, explicitly logout/login as the source branch pharmacist.
+# @name a4csrf
+GET {{base}}/api/v1/auth/csrf
+
+###
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{a4csrf.response.body.$.csrf_token}}
+
+###
+# @name a4prepare
+GET {{base}}/api/v1/auth/csrf
+
+###
+# @name a4login
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+X-CSRF-Token: {{a4prepare.response.body.$.csrf_token}}
+Content-Type: application/json
+
+{"email":"seed.yildiz@ddo-case.invalid","password":"{{password}}"}
+
+### Locate a valid sale line ID and its physical lot allocation
+GET {{base}}/api/v1/sales/{{a4Sale}}
+
+### Set a4Sale/a4SaleLine/a4Lot from that scoped detail. One line/lot per return command.
+@a4Sale = REPLACE_WITH_VALID_SALE_ID
+@a4SaleLine = REPLACE_WITH_ITS_LINE_ID
+@a4Lot = REPLACE_WITH_ITS_LOT_ID
+@a4Quarantine = REPLACE_WITH_RETURN_QUARANTINE_ID
+@a4Transfer = REPLACE_WITH_SENT_TRANSFER_ID
+@a4Count = REPLACE_WITH_OPEN_COUNT_ID
+@a4Product = REPLACE_WITH_PRODUCT_ID
+
+### Return preview: no reservation or writes
+# @name a4preview
+POST {{base}}/api/v1/returns/quote
+Origin: {{origin}}
+X-CSRF-Token: {{a4login.response.body.$.csrf_token}}
+Content-Type: application/json
+
+{"location_id":"1","reason":"Fiziksel iade","return":{"sale_id":"{{a4Sale}}","sale_line_id":"{{a4SaleLine}}","lot_id":"{{a4Lot}}","quantity":"1"}}
+
+### Return finalize: same successful key replays; RX/daily rights stay consumed
+# @name a4returned
+POST {{base}}/api/v1/returns
+Origin: {{origin}}
+X-CSRF-Token: {{a4login.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-return
+Content-Type: application/json
+
+{"location_id":"1","reason":"Fiziksel iade","return":{"sale_id":"{{a4Sale}}","sale_line_id":"{{a4SaleLine}}","lot_id":"{{a4Lot}}","quantity":"1","quote":"{{a4preview.response.body.$.quote}}"}}
+
+###
+GET {{base}}/api/v1/returns?location_id=1&limit=50
+
+###
+GET {{base}}/api/v1/quarantine?location_id=1&limit=50
+
+### Source branch pharmacist / warehouse actor at owned warehouse, never arbitrary stock adjustment
+POST {{base}}/api/v1/quarantine/{{a4returned.response.body.$.quarantine_id}}/decide
+Origin: {{origin}}
+X-CSRF-Token: {{a4login.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-release
+Content-Type: application/json
+
+{"location_id":"1","reason":"Muhur, fiziksel lot ve SKT dogrulandi","decision":{"action":"release","quantity":"1","sealed":true}}
+
+### Partial delivery at TARGET branch; lot belongs to this transfer
+POST {{base}}/api/v1/transfers/{{a4Transfer}}/receive
+Origin: {{origin}}
+X-CSRF-Token: {{a4login.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-partial
+Content-Type: application/json
+
+{"location_id":"1","delivery":{"final":false,"lines":[{"lot_id":"{{a4Lot}}","good":"4","damaged":"0","missing":"0"}]}}
+
+### Final delivery after the10-unit fixture's partial4; other quantities must match actual remainder
+POST {{base}}/api/v1/transfers/{{a4Transfer}}/receive
+Origin: {{origin}}
+X-CSRF-Token: {{a4login.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-final
+Content-Type: application/json
+
+{"location_id":"1","reason":"Bir hasar bir eksik","delivery":{"final":true,"lines":[{"lot_id":"{{a4Lot}}","good":"4","damaged":"1","missing":"1"}]}}
+
+### Cancel only DRAFT at SOURCE location; use source manager/warehouse CSRF
+POST {{base}}/api/v1/transfers/{{a4Transfer}}/cancel
+Origin: {{origin}}
+X-CSRF-Token: {{a4login.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-draft-cancel
+Content-Type: application/json
+
+{"location_id":"1","reason":"Taslak iptal"}
+
+### Switch explicitly to branch manager for count commands (pharmacist403)
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{a4login.response.body.$.csrf_token}}
+
+###
+# @name a4managerprepare
+GET {{base}}/api/v1/auth/csrf
+
+###
+# @name a4managerlogin
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerprepare.response.body.$.csrf_token}}
+Content-Type: application/json
+
+{"email":"mudur@ddo-case.invalid","password":"{{password}}"}
+
+### Counts at assigned branch1
+GET {{base}}/api/v1/counts?location_id=1&limit=50
+
+### Manager or warehouse; start snapshots all existing physical/quarantine lot rows
+POST {{base}}/api/v1/counts
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-count-start
+Content-Type: application/json
+
+{"location_id":"1","count":{"product_id":"{{a4Product}}"}}
+
+### All expected lot/account rows must be present; below is the single-physical-row example only
+POST {{base}}/api/v1/counts/{{a4Count}}/finalize
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-count-final
+Content-Type: application/json
+
+{"location_id":"1","reason":"Fiziksel kontrol","count":{"product_id":"{{a4Product}}","lines":[{"lot_id":"{{a4Lot}}","account":"physical","actual":"8"}]}}
+
+###
+POST {{base}}/api/v1/counts/{{a4Count}}/extend
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-count-extend
+Content-Type: application/json
+
+{"location_id":"1","reason":"Kontrol suruyor"}
+
+###
+POST {{base}}/api/v1/counts/{{a4Count}}/cancel
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-count-cancel
+Content-Type: application/json
+
+{"location_id":"1","reason":"Sayim iptal"}
+
+
+### A4.06-10 manual procurement. Start after manager login above; set a4Product to a valid catalog ID.
+# @name a4need
+POST {{base}}/api/v1/needs
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-need
+Content-Type: application/json
+
+{"location_id":"1","reason":"Sube ihtiyaci10","need":{"product_id":"{{a4Product}}","quantity":"10"}}
+
+### Own branch manager approval
+POST {{base}}/api/v1/needs/{{a4need.response.body.$.id}}/approve
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-need-approve
+Content-Type: application/json
+
+{"location_id":"1"}
+
+### Manager logout before warehouse login
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{a4managerlogin.response.body.$.csrf_token}}
+
+###
+# @name a4warehouseprepare
+GET {{base}}/api/v1/auth/csrf
+
+###
+# @name a4warehouselogin
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouseprepare.response.body.$.csrf_token}}
+Content-Type: application/json
+
+{"email":"depo@ddo-case.invalid","password":"{{password}}"}
+
+### Consolidated approved needs (follow next_cursor on retained data)
+GET {{base}}/api/v1/needs?location_id=21&limit=200
+
+###
+# @name a4order
+POST {{base}}/api/v1/orders
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-order
+Content-Type: application/json
+
+{"location_id":"21","supplier_id":"1","reason":"Konsolide manuel siparis","order":{"lines":[{"product_id":"{{a4Product}}","quantity":"10","needs":["{{a4need.response.body.$.id}}"]}]}}
+
+###
+POST {{base}}/api/v1/orders/{{a4order.response.body.$.id}}/approve
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-order-approve
+Content-Type: application/json
+
+{"location_id":"21"}
+
+### Appropriate4: remaining6
+POST {{base}}/api/v1/goods-receipts
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-order-good4
+Content-Type: application/json
+
+{"location_id":"21","supplier_id":"1","order_id":"{{a4order.response.body.$.id}}","document_no":"{{run}}-a4-good4","reason":"Uygun kabul","lines":[{"product_id":"{{a4Product}}","lot":"{{run}}-a4-lot","expires_on":"2099-12-31","quantity":"4"}]}
+
+### Unsuitable3: remaining still6; physical quarantine
+POST {{base}}/api/v1/goods-receipts
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-order-bad3
+Content-Type: application/json
+
+{"location_id":"21","supplier_id":"1","order_id":"{{a4order.response.body.$.id}}","receipt_mode":"quarantine","document_no":"{{run}}-a4-bad3","reason":"Fiziksel hasar","lines":[{"product_id":"{{a4Product}}","lot":"{{run}}-a4-lot","expires_on":"2099-12-31","quantity":"3"}]}
+
+### Appropriate6: remaining0
+POST {{base}}/api/v1/goods-receipts
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-order-good6
+Content-Type: application/json
+
+{"location_id":"21","supplier_id":"1","order_id":"{{a4order.response.body.$.id}}","document_no":"{{run}}-a4-good6","reason":"Uygun kalan kabul","lines":[{"product_id":"{{a4Product}}","lot":"{{run}}-a4-lot","expires_on":"2099-12-31","quantity":"6"}]}
+
+### Exact order projection and disjoint allocations; copy the matching allocation ID, never assume first page
+GET {{base}}/api/v1/orders?location_id=21&q={{a4order.response.body.$.id}}
+
+###
+GET {{base}}/api/v1/allocations?location_id=21&limit=200
+
+@a4Allocation = REPLACE_WITH_MATCHING_ORDER_ALLOCATION_ID
+
+### A reserved draft; a free transfer without allocation_id cannot use this stock
+POST {{base}}/api/v1/transfers
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-reserved-draft
+Content-Type: application/json
+
+{"location_id":"21","target_id":"1","allocation_id":"{{a4Allocation}}","items":[{"product_id":"{{a4Product}}","quantity":"10","unit":"unit"}]}
+
+### Cancel only open UNRECEIVED remainder; after the complete10 fixture this intentionally returns409
+POST {{base}}/api/v1/orders/{{a4order.response.body.$.id}}/cancel
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a4-order-cancel
+Content-Type: application/json
+
+{"location_id":"21","reason":"Yalniz acik kalan iptali"}
+
+
+### A5 switch from the A4 warehouse session to manager (or clear cookies and start at prepare)
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{a4warehouselogin.response.body.$.csrf_token}}
+
+###
+# @name a5managerprepare
+GET {{base}}/api/v1/auth/csrf
+
+###
+# @name a5managerlogin
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+X-CSRF-Token: {{a5managerprepare.response.body.$.csrf_token}}
+Content-Type: application/json
+
+{"email":"mudur@ddo-case.invalid","password":"{{password}}"}
+
+### Manager branch policy. a4Product is a real product from earlier flow; use a new run/version per edit.
+POST {{base}}/api/v1/suggestion-policies
+Origin: {{origin}}
+X-CSRF-Token: {{a5managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a5-policy
+Content-Type: application/json
+
+{"location_id":"1","suggestion_policy":{"product_id":"{{a4Product}}","version":"{{run}}-policy","lead_days":3,"review_days":2,"safety_days":2,"season":"1.2","minimum":"14"}}
+
+### Full calculation; asOf must be the intended current demo day. Manager may calculate globally but reads assigned branch.
+# @name a5run
+POST {{base}}/api/v1/suggestion-runs
+Origin: {{origin}}
+X-CSRF-Token: {{a5managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a5-run
+Content-Type: application/json
+
+{"location_id":"1","as_of":"{{asOf}}"}
+
+### Results: follow next_cursor; copy a suitable own-branch suggestion ID to suggestionId.
+GET {{base}}/api/v1/suggestions?location_id=1&q={{a5run.response.body.$.id}}&limit=50
+
+### Optional: choose a fresh suggestion with suggested>0. Different key cannot consume it twice.
+POST {{base}}/api/v1/suggestions/{{suggestionId}}/need
+Origin: {{origin}}
+X-CSRF-Token: {{a5managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a5-need
+Content-Type: application/json
+
+{"location_id":"1","reason":"Mudur incelemesi"}
+
+### Alternative inspection: choose return_quantity>0; stale results require a new calculation.
+POST {{base}}/api/v1/suggestions/{{suggestionId}}/return
+Origin: {{origin}}
+X-CSRF-Token: {{a5managerlogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a5-return
+Content-Type: application/json
+
+{"location_id":"1","target_id":"21","reason":"Satis yok yakin SKT"}
+
+### Manager branch report reads (before logging out)
+GET {{base}}/api/v1/reports/expiry?location_id=1
+###
+GET {{base}}/api/v1/reports/critical?location_id=1&q={{a5run.response.body.$.id}}
+###
+GET {{base}}/api/v1/reports/finance?location_id=1
+###
+GET {{base}}/api/v1/reports/transfer-differences?location_id=1
+###
+GET {{base}}/api/v1/reports/reconciliation?location_id=1
+
+### Manager logout
+POST {{base}}/api/v1/auth/logout
+Origin: {{origin}}
+X-CSRF-Token: {{a5managerlogin.response.body.$.csrf_token}}
+
+###
+# @name a5warehouseprepare
+GET {{base}}/api/v1/auth/csrf
+
+###
+# @name a5warehouselogin
+POST {{base}}/api/v1/auth/login
+Origin: {{origin}}
+X-CSRF-Token: {{a5warehouseprepare.response.body.$.csrf_token}}
+Content-Type: application/json
+
+{"email":"depo@ddo-case.invalid","password":"{{password}}"}
+
+### Warehouse sets a real allocation ETA (allocationId must be copied from A4 order projection)
+POST {{base}}/api/v1/allocations/{{allocationId}}/eta
+Origin: {{origin}}
+X-CSRF-Token: {{a5warehouselogin.response.body.$.csrf_token}}
+Idempotency-Key: {{run}}-a5-eta
+Content-Type: application/json
+
+{"location_id":"21","expected_on":"{{asOf}}"}
+
+### A6 live dashboard (warehouse scope; no branch1 event detail)
+GET {{base}}/api/v1/dashboard

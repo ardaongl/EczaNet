@@ -1,0 +1,7 @@
+# Isolated fresh-volume A1 acceptance; avoids the running demo's names/ports.
+services:
+  api:
+    container_name: ddo-orman-api-a1-clean
+    ports: !override ["18080:8080"]
+  web:
+    ports: !override ["13000:3000"]

@@ -1,0 +1,23 @@
+# Explicitly isolated target; fixed identity makes destructive-target checks auditable.
+services:
+  migrate-seed:
+    image: eczanet-a6-app:local
+    environment:
+      DEMO_FULL_SEED: "true"
+  api:
+    image: eczanet-a6-app:local
+    environment:
+      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:8080,http://localhost:13006,http://localhost:18086,http://localhost:13007,http://localhost:18087
+    container_name: ddo-orman-api-a6
+    ports: !override ["18086:8080"]
+  web:
+    image: eczanet-a6-web:local
+    ports: !override ["13006:3000"]
+  simulator:
+    image: eczanet-a6-app:local
+    environment:
+      SIMULATOR_ENABLED: ${A6_SIMULATOR_ENABLED:-false}
+  verify:
+    image: eczanet-a6-app:local
+  tools:
+    image: eczanet-a6-tools:local

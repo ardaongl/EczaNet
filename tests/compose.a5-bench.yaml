@@ -1,0 +1,12 @@
+services:
+  a5-bench-api:
+    image: eczanet-app:a1
+    command: [/app/api]
+    environment:
+      DATABASE_URL: postgres://eczanet_runtime:${RUNTIME_PASSWORD:?required}@db:5432/eczanet_a5_bench17?sslmode=disable
+      ALLOWED_ORIGINS: http://localhost:8080
+      COOKIE_SECURE: "false"
+      STOCK_STATEMENT_TIMEOUT: 5s
+    ports: ["8085:8080"]
+    depends_on:
+      db: {condition: service_healthy}

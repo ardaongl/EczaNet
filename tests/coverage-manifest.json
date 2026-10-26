@@ -1,0 +1,28 @@
+{
+  "phase": "A6",
+  "minimum_domain_coverage_percent": 70,
+  "required_domain_packages": [
+    "internal/stock"
+  ],
+  "status": "All business domains remain in internal/stock; per-package threshold 70%. Current actual results are in A6 evidence; remote CI requires authorized push.",
+  "implemented_domain_packages": [
+    "internal/stock"
+  ],
+  "component_owners": {
+    "inventory": "internal/stock",
+    "normal_sales": "internal/stock",
+    "basic_transfers": "internal/stock",
+    "basic_receipts": "internal/stock",
+    "prescriptions": "internal/stock",
+    "controlled_limits": "internal/stock",
+    "pricing": "internal/stock",
+    "returns": "internal/stock",
+    "quarantine": "internal/stock",
+    "transfer_receipts": "internal/stock",
+    "counts": "internal/stock",
+    "procurement": "internal/stock",
+    "suggestion_reference": "internal/stock",
+    "suggestions": "internal/stock",
+    "reports": "internal/stock"
+  }
+}

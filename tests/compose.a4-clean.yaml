@@ -1,0 +1,7 @@
+# Dedicated A4 validation project; never use down -v with the main project.
+services:
+  api:
+    container_name: ddo-orman-api-a4-clean
+    ports: !override ["18084:8080"]
+  web:
+    ports: !override ["13004:3000"]
