@@ -1,0 +1,36 @@
+import { StrictMode, useEffect, useState, type FormEvent } from 'react';
+import { createRoot } from 'react-dom/client';
+import './style.css';
+import {Business} from './business';
+import {Dashboard} from './dashboard';
+
+type User = {id:string;email:string;role:string};
+type Location = {id:string;name:string;kind:string};
+const roles:Record<string,string>={pharmacist:'Eczacı',technician:'Teknisyen',warehouse:'Depo sorumlusu',manager:'Şube müdürü',accountant:'Muhasebe'};
+const planned:Record<string,string[]>={pharmacist:['Katalog','Stok','Hareketler','Satışlar','İadeler','Kasa ve reçete','Kontrollü defter','Transfer','Sayım','Karantina','İhtiyaçlar','Siparişler','Tahsisler','Öneriler','Raporlar','Kritik stok','Stok uzlaştırma','Transfer farkları','Finans raporları'],technician:['Katalog','Stok','Hareketler','Satışlar','İadeler','Kasa ve reçete'],warehouse:['Katalog','Stok','Hareketler','Mal kabul','Transfer','Sayım','Karantina','İhtiyaçlar','Siparişler','Tahsisler','Öneriler','Raporlar','Kritik stok','Stok uzlaştırma','Transfer farkları'],manager:['Katalog','Stok','Hareketler','Satışlar','Kontrollü defter','Transfer','Sayım','İhtiyaçlar','Siparişler','Tahsisler','Öneriler','Raporlar','Kritik stok','Stok uzlaştırma','Transfer farkları','Finans raporları'],accountant:['Öneriler','Katalog','Siparişler','Tahsisler','Finans raporları','Fiyat politikası']};
+class APIError extends Error { constructor(public status:number,message:string){super(message)} }
+async function request<T>(path:string,init?:RequestInit):Promise<T>{
+ const response=await fetch('/api/v1'+path,{credentials:'same-origin',...init});
+ if(!response.ok){const body=await response.json().catch(()=>null);throw new APIError(response.status,body?.error?.message??'Sunucuya ulaşılamıyor. Tekrar deneyin.');}
+ return response.status===204?undefined as T:response.json();
+}
+function App(){
+ const [user,setUser]=useState<User|null>(null),[locations,setLocations]=useState<Location[]>([]),[active,setActive]=useState<Location|null>(null);
+ const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[csrf,setCsrf]=useState(''),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(''),[page,setPage]=useState('Çalışma alanı');
+ async function load(){setLoading(true);setError('');try{
+  const me=await request<{user:User}>('/auth/me');setUser(me.user);
+  const result=await request<{locations:Location[]}>('/auth/locations');setLocations(result.locations);setActive(result.locations[0]??null);
+  const prep=await request<{csrf_token:string}>('/auth/csrf');setCsrf(prep.csrf_token);
+ }catch(e){if(e instanceof APIError&&e.status===401){setUser(null);try{setCsrf((await request<{csrf_token:string}>('/auth/csrf')).csrf_token)}catch{setError('Giriş hazırlığı yapılamadı. Yeniden deneyin.')}}else{setError(e instanceof Error?e.message:'Bağlantı hatası')}}finally{setLoading(false)}}
+ useEffect(()=>{void load()},[]);
+ async function login(event:FormEvent){event.preventDefault();setBusy(true);setError('');try{
+  await request('/auth/login',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({email,password})});setPassword('');await load();
+ }catch(e){setError(e instanceof Error?e.message:'Giriş başarısız');try{setCsrf((await request<{csrf_token:string}>('/auth/csrf')).csrf_token)}catch{/* visible original error is retained */}}finally{setBusy(false)}}
+ async function logout(){setBusy(true);setError('');try{await request('/auth/logout',{method:'POST',headers:{'X-CSRF-Token':csrf}});setUser(null);setLocations([]);setActive(null);setPage('Çalışma alanı');await load()}catch(e){if(e instanceof APIError&&e.status===401){setUser(null);await load()}else setError('Çıkış tamamlanamadı. Yeniden deneyin.')}finally{setBusy(false)}}
+ async function selectLocation(id:string){setBusy(true);setError('');try{setActive(await request<Location>('/locations/'+id))}catch(e){if(e instanceof APIError&&e.status===401){setUser(null);await load()}else setError('Lokasyon açılamadı. Yeniden deneyin.')}finally{setBusy(false)}}
+ if(loading)return <main className="loading" role="status">Çalışma alanı yükleniyor…</main>;
+ return <div className="app"><header><a className="brand" href="/">Ecza<span>Net</span></a><span className="demo">Kurgusal demo · A6</span></header>
+ {!user?<main className="login"><p className="eyebrow">ECZANE ZİNCİRİ YÖNETİMİ</p><h1>Çalışma alanınıza giriş yapın.</h1><p>Rolünüz ve atanmış lokasyonlarınız hesabınızdan alınır.</p><form onSubmit={login}><label htmlFor="email">E-posta</label><input id="email" type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/><label htmlFor="password">Parola</label><input id="password" type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/>{error&&<p role="alert" className="error">{error}</p>}<button disabled={busy||!csrf}>{busy?'Giriş yapılıyor…':'Giriş yap'}</button>{!csrf&&<button type="button" className="secondary" onClick={()=>void load()}>Yeniden dene</button>}</form><p className="note">Bu sistem kurgusal veri kullanır. Gerçek SGK, MEDULA veya ödeme entegrasyonu içermez.</p></main>:
+ <div className="workspace"><aside><p className="eyebrow">{roles[user.role]}</p><p className="email">{user.email}</p><nav aria-label="Çalışma menüsü"><button className={page==='Çalışma alanı'?'selected':''} onClick={()=>setPage('Çalışma alanı')}>Çalışma alanı</button>{(planned[user.role]??[]).map(name=><button key={name} className={page===name?'selected':''} onClick={()=>setPage(name)}>{name}{!['Katalog','Stok','Hareketler','Mal kabul','Transfer','Kasa ve reçete','Satışlar','Fiyat politikası','Kontrollü defter','İadeler','Karantina','Sayım','İhtiyaçlar','Siparişler','Tahsisler','Öneriler','Raporlar','Kritik stok','Stok uzlaştırma','Transfer farkları','Finans raporları'].includes(name)&&<small>Hazırlanıyor</small>}</button>)}</nav><button className="secondary" disabled={busy} onClick={()=>void logout()}>Çıkış yap</button></aside><main className="content"><p className="eyebrow">{active?.kind==='warehouse'?'DEPO':'ECZANET'}</p><h1>{page}</h1>{error&&<p role="alert" className="error">{error}</p>}<section className="location"><label htmlFor="location">Aktif lokasyon</label>{locations.length?<select id="location" value={active?.id??''} disabled={busy} onChange={e=>void selectLocation(e.target.value)}>{locations.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select>:<p>Atanmış fiziksel lokasyonunuz yok. Muhasebe hesabı zincir finansı kapsamındadır.</p>}</section>{['Katalog','Stok','Hareketler','Mal kabul','Transfer','Kasa ve reçete','Satışlar','Fiyat politikası','Kontrollü defter','İadeler','Karantina','Sayım','İhtiyaçlar','Siparişler','Tahsisler','Öneriler','Raporlar','Kritik stok','Stok uzlaştırma','Transfer farkları','Finans raporları'].includes(page)?<Business key={user.id+':'+page+':'+active?.id} page={page} location={active?.id??''} role={user.role} csrf={csrf} actor={user.id} onReauthenticate={()=>void load()}/>:<Dashboard onReauthenticate={()=>void load()}/>}<footer>Kurgusal demo. Gerçek SGK / ödeme entegrasyonu yoktur.</footer></main></div>}</div>;
+}
+createRoot(document.getElementById('root')!).render(<StrictMode><App/></StrictMode>);
