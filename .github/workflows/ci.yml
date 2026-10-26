@@ -1,0 +1,61 @@
+name: EczaNet A1-A6 build and verification
+on: [push, pull_request]
+jobs:
+  a1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: cp .env.example .env
+      - name: Container build and automatic migration / seed
+        run: docker compose up --build -d --wait
+      - name: Full F1-F7 T1-T5 API acceptance on exact full seed
+        run: docker compose --profile verify run --rm verify
+      - name: PostgreSQL integration, unit tests and coverage artifact
+        run: |
+          mkdir -p artifacts
+          chmod 777 artifacts
+          docker compose --profile tools run --rm --build -v "$PWD/artifacts:/evidence" tools go test -v -count=1 -coverprofile=/evidence/coverage.out ./...
+          docker compose --profile tools run --rm --no-deps tools go vet ./...
+          docker compose --profile tools run --rm --no-deps tools sh -c 'test -z "$(gofmt -l cmd internal tests)"'
+      - name: Race checks on identity, HTTP and pure domain boundaries
+        run: docker compose --profile tools run --rm --no-deps tools sh -c "apk add --no-cache gcc musl-dev && go test -race -run 'Test(Absolute|Default|Login|CSRF|Prelogin|Platform|Request|Conversion|Price|Pricing|FEFO)' ./internal/auth ./internal/platform ./internal/stock"
+      - name: Deployed API fault regressions after full PostgreSQL suite
+        run: docker compose --profile tools run --rm --no-deps -e TEST_CORRECTION_API_URL=http://api:8080 tools go test -v -count=1 -run TestA3Correction ./tests/integration
+      - name: Current domain coverage gate
+        run: python3 scripts/check-coverage.py artifacts/coverage.out
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.13.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Small isolated browser target, same app revision
+        run: |
+          docker tag eczanet-app:a1 eczanet-a6-app:local
+          docker tag eczanet-web:a1 eczanet-a6-web:local
+          docker tag eczanet-tools:a1 eczanet-a6-tools:local
+          docker compose -p eczanet-a6-ui -f compose.yaml -f tests/compose.a6-ui.yaml up -d --wait
+      - name: Frontend build and browser scenarios
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          npx playwright install --with-deps chromium
+          TEST_WEB_URL=http://localhost:13007 TEST_COMPOSE_PROJECT=eczanet-a6-ui npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: a6-evidence
+          path: |
+            artifacts/
+            artifacts/browser-runs/
+      - name: Documentation and HTTP route parity
+        run: python scripts/check-docs.py
+      - name: Stop services
+        if: always()
+        run: |
+          docker compose -p eczanet-a6-ui -f compose.yaml -f tests/compose.a6-ui.yaml down
+          docker compose down

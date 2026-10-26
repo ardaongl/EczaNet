@@ -1,0 +1,4800 @@
+openapi: 3.0.3
+info:
+  title: EczaNet A6
+  version: 0.6.0
+  description: |
+    Kurgusal A1-A6 demo; gercek SGK/MEDULA veya odeme entegrasyonu yoktur.
+    Her API yaniti X-DDO-Stamp a33906 ve X-Request-ID tasir; hatalar error/code/message bicimindedir.
+    Login/logout ve is POST uclari izinli Origin ve CSRF ister. Oturum8 saat, prelogin10 dakika.
+    Cookie HttpOnly/SameSite=Lax; TLS modunda Secure. Kimliksiz401, yasak403, durum409, kural422, gecici503.
+    Kritik POST Idempotency-Key kapsaminda normalize body ile tek etki; replay oncesi yetki yeniden kontrol edilir.
+    Bigint kimlik/miktar/kurus JSON metni; keyset sayfa50/max200, degisen scope cursor400.
+    Bilinmeyen JSON alanlari reddedilir; govde16KiB; lock2s/statement5s/HTTP15s/proxy20s.
+    Katalog/FEFO/recete/fiyat/iade/karantina/transfer/sayim/tedarik/oneri/rapor ve gercek dashboard mevcuttur.
+    Bes insan rolu, ek B subesi ve sadece acik atanmis lokasyonlarda sinirli simulator servis hesabi vardir.
+    Simulator HTTP API kullanir; runtime saat override veya offline seed yazma yetkisi yoktur.
+
+servers:
+- url: http://localhost:8080
+- url: http://localhost:3000
+security:
+- session: []
+paths:
+  /api/v1/dashboard:
+    get:
+      summary: Caller-scoped live sales and stock summary; simulator offline/stopped/running status
+      responses:
+        '200':
+          description: Real aggregates and last authorized simulator event; refresh every 5 seconds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sale_count, physical, simulator, updated_at]
+                properties:
+                  sale_count: {type: string}
+                  physical: {type: string}
+                  simulator: {type: object, additionalProperties: true}
+                  updated_at: {type: string, format: date-time}
+        '401': {description: Session required}
+        '403': {description: Service account cannot use interactive summary}
+        '503': {description: Database unavailable}
+  /health:
+    get:
+      security: []
+      summary: Bir saniye butceli DB readiness
+      responses:
+        '200':
+          description: DB erisilebilir
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /_hz/a339:
+    get:
+      security: []
+      summary: DB'den bagimsiz liveness
+      responses:
+        '200':
+          description: API ayakta
+  /metrics:
+    get:
+      security: []
+      summary: Lokal demoda acik, yalniz teknik metrikler
+      responses:
+        '200':
+          description: Prometheus exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/v1/auth/csrf:
+    get:
+      security: []
+      summary: Cookie jar'a prelogin cookie ve JSON token al; login sonrasi oturum
+        CSRF'sini al
+      description: 'Giris oncesi 32 byte rastgele token uretilir; yalniz hash''i ve
+        bitis zamani
+
+        sunucunun sinirli belleginde tutulur. Istemci JSON tokenini header''a koyar;
+
+        HttpOnly cookie tarayici tarafindan aynen iletilir. Yeniden baslatma eski
+
+        prelogin tokenini gecersiz kilar; endpointi yeniden cagir. Giris sonrasi
+
+        bu endpoint mevcut oturuma bagli tokeni dondurur, yeni oturum acmaz.
+
+        '
+      responses:
+        '200':
+          description: Set-Cookie ve CSRF JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CSRF'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/auth/login:
+    post:
+      security: []
+      summary: Five human roles plus branch B and restricted simulator service login
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - email
+              - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                password:
+                  type: string
+                  maxLength: 72
+      responses:
+        '200':
+          description: Yeni session cookie; eski tarayici oturumu iptal edilir
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - user
+                - csrf_token
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  csrf_token:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/auth/logout:
+    post:
+      summary: Oturumu DB'de iptal et ve cookie'yi temizle
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      responses:
+        '204':
+          description: Bos govde; session cookie temizlenir
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/auth/me:
+    get:
+      summary: Her istekte guncel aktiflik ve rol oku
+      responses:
+        '200':
+          description: Guncel kullanici
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/auth/locations:
+    get:
+      summary: Yalniz atanmis fiziksel lokasyonlar; muhasebe icin bos dizi
+      responses:
+        '200':
+          description: Yetkili lokasyonlar
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  locations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Location'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/locations/{id}:
+    get:
+      summary: Atanmis lokasyonun gercek kaydi; diger kapsama 403
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Yetkili kayit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Location'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/products:
+    get:
+      summary: 'Katalog: tum insan rolleri'
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: &id001
+          type: string
+      - name: q
+        in: query
+        schema: *id001
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: 'Urun olustur: depo/atanmis depo'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProduct'
+  /api/v1/products/{id}/disable:
+    post:
+      summary: 'Urun pasife al: depo'
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: &id002
+          type: string
+          pattern: ^[1-9][0-9]*$
+          description: pozitif bigint ondalik metin
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResult'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationCommand'
+  /api/v1/inventory:
+    get:
+      summary: 'Lot ve hesap bakiyeleri: atanmis lokasyon'
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: *id001
+      - name: location_id
+        in: query
+        required: true
+        schema: *id002
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/inventory/movements:
+    get:
+      summary: 'Cift tarafli stok defteri: atanmis lokasyon'
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: *id001
+      - name: location_id
+        in: query
+        required: true
+        schema: *id002
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/suppliers:
+    get:
+      summary: Kurgusal tedarikciler
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: *id001
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/transfer-targets:
+    get:
+      summary: Depo icin sevk hedefleri
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: *id001
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      description: Kaynak depo sorumlusu veya atanmis subenin muduru. Hedef depo/sube
+        olabilir; kaynak ve hedef farkli olmali. DRAFT stok ayirmaz; sevk guard altinda
+        mevcut FEFO tahsisini/SKT/stogu tekrar dogrular. Teslim kaynak ve hedef guardlarini
+        birlikte kullanir. Sayim409; kaynak/hedef yazma izni sunucuda ayridir.
+  /api/v1/goods-receipts:
+    post:
+      summary: 'Siparissiz uygun irsaliye: depo'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResult'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReceipt'
+      description: Depo sorumlusu kendi deposunda kabul eder. order_id varsa uygun
+        kabul acik miktari azaltir (%0 fazla tolerans); receipt_mode=quarantine fiziksel
+        uygunsuzu kaydeder, order kalani azalmaz. Tedarikci+belge no ayni icerikte
+        tek etki, farkli icerikte409. Tum etkiler bir transaction; gecmis lot yalniz
+        quarantine modunda gerekceyle. Siparis DRAFT/CLOSED/CANCELLED/RECEIVED yeni
+        kabule kapali; eski ayni belge tekrar sonucu korunur.
+  /api/v1/transfers:
+    get:
+      summary: Kaynak/hedef tarafi transferleri
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: *id001
+      - name: location_id
+        in: query
+        required: true
+        schema: *id002
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Depodan subeye FEFO sevk taslagi
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResult'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransfer'
+      description: allocation_id verilirse kaynak/hedef/urun tahsisle eslesmeli; depoda
+        tahsisli uygun lotlar secilir. Serbest sevk baska subenin tahsisli miktarini
+        kullanamaz. Taslak stok ayirmaz; send aninda ayni kontroller tekrarlanir.
+  /api/v1/transfers/{id}/send:
+    post:
+      summary: Kaynak depodan gonder
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id002
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResult'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationCommand'
+      description: Kaynak depo sorumlusu veya atanmis subenin muduru. Hedef depo/sube
+        olabilir; kaynak ve hedef farkli olmali. DRAFT stok ayirmaz; sevk guard altinda
+        mevcut FEFO tahsisini/SKT/stogu tekrar dogrular. Teslim kaynak ve hedef guardlarini
+        birlikte kullanir. Sayim409; kaynak/hedef yazma izni sunucuda ayridir.
+  /api/v1/transfers/{id}/receive:
+    post:
+      summary: Hedef eczaci/mudur veya hedef depo sorumlusu; ara/final, fazla ret,
+        hasar hedefte, eksik kaynak loss. Delivery yoksa tum kalan final; SKT yeniden
+        kontrol edilir.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: &id006
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '200':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeliveryCommand'
+  /api/v1/sales/quote:
+    post:
+      summary: 'Quote or atomic sale: normal items OR prescription_id + dispense;
+        technician quote, pharmacist RX commit'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: PRICE_CHANGED with new_quote (no side effects); explicit reapproval/new
+            intent key required. IDEMPOTENCY_CONFLICT for different bodies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT / PRODUCT_NOT_ELIGIBLE / PRICE_MISSING / PRESCRIPTION_EXPIRED
+            / PRESCRIPTION_REMAINDER / DAILY_LIMIT / NOT_EQUIVALENT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteInput'
+  /api/v1/sales:
+    get:
+      summary: Atanmis lokasyon satis/snapshot/tahsis listesi
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: *id001
+      - name: location_id
+        in: query
+        required: true
+        schema: *id002
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: 'Quote or atomic sale: normal items OR prescription_id + dispense;
+        technician quote, pharmacist RX commit'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sale'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: PRICE_CHANGED with new_quote (no side effects); explicit reapproval/new
+            intent key required. IDEMPOTENCY_CONFLICT for different bodies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT / PRODUCT_NOT_ELIGIBLE / PRICE_MISSING / PRESCRIPTION_EXPIRED
+            / PRESCRIPTION_REMAINDER / DAILY_LIMIT / NOT_EQUIVALENT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSale'
+  /api/v1/sales/{id}:
+    get:
+      summary: 'Satis detayi: kayit lokasyonu yetkisi'
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id002
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sale'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/prescriptions:
+    get:
+      summary: RX external_id exact search q; pharmacist/technician; unowned or own
+        branch
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: &id003
+          type: string
+      - name: q
+        in: query
+        schema: *id003
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED / PRESCRIPTION_BRANCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+            / PRESCRIPTION_CONFLICT / PATIENT_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+            / PRESCRIPTION_EXPIRED / PRESCRIPTION_REMAINDER / NOT_EQUIVALENT / DAILY_LIMIT
+            / FUTURE_PRICE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Demo import; pharmacist/technician or scoped simulator; global external_id
+        duplicate validation
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED / PRESCRIPTION_BRANCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+            / PRESCRIPTION_CONFLICT / PATIENT_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+            / PRESCRIPTION_EXPIRED / PRESCRIPTION_REMAINDER / NOT_EQUIVALENT / DAILY_LIMIT
+            / FUTURE_PRICE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoadPrescription'
+      description: Cached imports retain their original idempotent response, but current
+        prescription owner access is checked under FOR SHARE after the idempotency
+        lock and before returning it. Foreign branch ownership returns error-only
+        403 PRESCRIPTION_BRANCH for same key/body too. The lock serializes with first-sale
+        FOR UPDATE; a fresh import of an existing RX uses the same access lock.
+  /api/v1/products/{id}/equivalents:
+    get:
+      summary: Normalized full composition + dose + form + base unit; active products
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: &id021
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED / PRESCRIPTION_BRANCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+            / PRESCRIPTION_CONFLICT / PATIENT_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+            / PRESCRIPTION_EXPIRED / PRESCRIPTION_REMAINDER / NOT_EQUIVALENT / DAILY_LIMIT
+            / FUTURE_PRICE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/prices:
+    get:
+      summary: Accountant chain-wide versioned price periods
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: &id004
+          type: string
+      - name: q
+        in: query
+        schema: *id004
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED / PRESCRIPTION_BRANCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+            / PRESCRIPTION_CONFLICT / PATIENT_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+            / PRESCRIPTION_EXPIRED / PRESCRIPTION_REMAINDER / NOT_EQUIVALENT / DAILY_LIMIT
+            / FUTURE_PRICE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Accountant schedules strictly future price; product locked and current
+        interval split
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED / PRESCRIPTION_BRANCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+            / PRESCRIPTION_CONFLICT / PATIENT_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+            / PRESCRIPTION_EXPIRED / PRESCRIPTION_REMAINDER / NOT_EQUIVALENT / DAILY_LIMIT
+            / FUTURE_PRICE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SchedulePrice'
+      description: Sales lock each product FOR SHARE, ordered by numeric product id,
+        before stock guards/effective_at/pricing; publication holds FOR UPDATE until
+        commit. valid_from is checked against the real DB clock AFTER the exclusive
+        product lock. If the requested start passed while waiting, reject atomically
+        with 422 FUTURE_PRICE_REQUIRED; do not backdate or shift the start automatically.
+        If a publisher acquired the lock before its future start, commit may be delayed
+        past that start while sales remain blocked; those sales price only after publication
+        commit.
+  /api/v1/controlled-ledger:
+    get:
+      summary: Pharmacist/manager assigned branch; append-only controlled ledger
+      description: Orijinal tuketim kayitlari degismez. returns dizisi return_line_id/quantity
+        ile ayri iadeleri gosterir; gunluk tuketim azalmaz.
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          default: 50
+          minimum: 1
+          maximum: 200
+      - name: cursor
+        in: query
+        schema: &id005
+          type: string
+      - name: q
+        in: query
+        schema: *id005
+      responses:
+        '200':
+          description: Basari
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: INVALID_INPUT/INVALID_CURSOR/IDEMPOTENCY_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: UNAUTHENTICATED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: FORBIDDEN/CSRF_REJECTED/ORIGIN_REJECTED / PRESCRIPTION_BRANCH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: INSUFFICIENT_STOCK/PRICE_CHANGED/IDEMPOTENCY_CONFLICT/DOCUMENT_CONFLICT/INVALID_STATE
+            / PRESCRIPTION_CONFLICT / PATIENT_CONFLICT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: INVALID_INPUT/EXPIRED_LOT/LOT_CONFLICT/PRODUCT_NOT_ELIGIBLE/PRICE_MISSING/FULL_RECEIPT_ONLY
+            / PRESCRIPTION_EXPIRED / PRESCRIPTION_REMAINDER / NOT_EQUIVALENT / DAILY_LIMIT
+            / FUTURE_PRICE_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'UNAVAILABLE: yogunluk/DB/commit belirsizligi'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/returns/quote:
+    post:
+      summary: Asil satis subesi eczacisi; snapshot paylarini kumulatif onizler. Yazim/rezervasyon
+        yok.
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      responses:
+        '200':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReturnCommand'
+  /api/v1/returns:
+    post:
+      summary: Asil satis subesi eczacisi; belge+lot+para+karantina tek transaction.
+        RX/limit hakki acilmaz. Quote verilirse degisen pay409.
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReturnCommand'
+    get:
+      summary: Atanmis subenin iade belgeleri; muhasebe fiziksel listeye erisemez.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema: *id006
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/quarantine:
+    get:
+      summary: Atanmis lokasyonda kaynak hareketi ve kalan karantina; sayim kayiplari
+        dusulur.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema: *id006
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/quarantine/{id}/decide:
+    post:
+      summary: Sube eczacisi/depo sorumlusu; kaynakli gerekceli karar. Release muhur
+        ve gecerli SKT ister.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id006
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionCommand'
+  /api/v1/transfers/{id}/cancel:
+    post:
+      summary: Yalniz kaynak mudur/depo sorumlusu; sadece DRAFT iptal edilir.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id006
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '200':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonCommand'
+  /api/v1/counts:
+    get:
+      summary: Atanmis lokasyondaki sayimlar; beklenen ve final fiziksel satirlar.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema: *id006
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      summary: Sube muduru/depo sorumlusu; tek urun kapsaminda30dk mantiksal dondurma;
+        lines kabul edilmez.
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CountCommand'
+  /api/v1/counts/{id}/finalize:
+    post:
+      summary: Kapsam muduru/depo sorumlusu; tum beklenen satirlar zorunlu, bilinen
+        ayni urun lotu eklenebilir. Fark karsi hesapli append-only.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id006
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CountCommand'
+  /api/v1/counts/{id}/cancel:
+    post:
+      summary: Kapsam muduru/depo sorumlusu; OPEN sayim gerekceyle cancel. Gecmis/kapali
+        sayim409.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id006
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonCommand'
+  /api/v1/counts/{id}/extend:
+    post:
+      summary: Kapsam muduru/depo sorumlusu; OPEN sayim gerekceyle extend. Gecmis/kapali
+        sayim409.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id006
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Sunucunun kesin sonucu; kimlik/miktar/kuruslar ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Durum/miktar/cursor veya idempotency catismasi; COUNT_IN_PROGRESS,
+            RETURN_CHANGED dahil.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Gecersiz snapshot, SKT, muhur, eksik nihai beyan veya is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonCommand'
+  /api/v1/needs:
+    post:
+      summary: Atanmis sube eczacisi/muduru taslak ihtiyac olusturur.
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NeedCommand'
+    get:
+      summary: Eczaci/mudur kendi subesi; depo onayli konsolide ihtiyaclari okur.
+        Teknisyen/muhasebe403.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema: &id007
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/needs/{id}/approve:
+    post:
+      summary: Yalniz kendi subesinin muduru DRAFT ihtiyaci onaylar.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id007
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationCommand'
+  /api/v1/orders:
+    post:
+      summary: Atanmis depo sorumlusu onayli ihtiyaclardan siparis taslagi yapar.
+        Need bir kez kullanilir; toplam tahsis siparis miktarini asamaz. Tahsissiz
+        miktar merkez ihtiyacidir.
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCommand'
+    get:
+      summary: Depo kendi siparisleri; sube kendi tahsisli satirlari; muhasebe tum
+        zincir, degistirme izni yok. q istege bagli tam belge ID filtresi.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema: *id007
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/orders/{id}/approve:
+    post:
+      summary: Atanmis depo sorumlusu DRAFT siparisi APPROVED yapar; taslak beklenen
+        tedarik sayilmaz.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id007
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationCommand'
+  /api/v1/orders/{id}/cancel:
+    post:
+      summary: Atanmis depo sorumlusu sadece alinmamis acik kalani iptal eder. Kabul
+        edilen tahsis/yolda miktar korunur.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: *id007
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonCommand'
+  /api/v1/allocations:
+    get:
+      summary: Depo/sube atanmis kapsam; muhasebe zincir. expected/at_warehouse/in_transit/delivered/exceptions/cancelled
+        ayrik asamalardir. Merkez tahsissiz bekleyen sube listesinde yoktur.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema: *id007
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/suggestion-runs:
+    post:
+      summary: 'Manager at assigned branch or warehouse: calculate ALL active product
+        x branch pairs in one REPEATABLE READ transaction; preparation_ms (summary/source/run), summary_ms, scope_ms
+        and calculation_ms (scope + full INSERT/publication) separate. Server-Timing
+        commit duration is separate; failed run unpublished.'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestionRunInput'
+  /api/v1/suggestion-policies:
+    post:
+      summary: 'Assigned branch manager: new explicit policy version; horizon sum
+        1..90.'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestionPolicyInput'
+  /api/v1/suggestions/{id}/need:
+    post:
+      summary: 'Assigned pharmacist/manager: consume suggestion once to A4 need draft;
+        manager approves then warehouse converts to supplier order.'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      - in: path
+        name: id
+        required: true
+        schema: &id008
+          type: string
+          pattern: ^[1-9][0-9]*$
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestionNeedInput'
+  /api/v1/suggestions/{id}/return:
+    post:
+      summary: 'Assigned branch manager: one branch-to-warehouse DRAFT; normal shipment
+        rechecks stock.'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      - in: path
+        name: id
+        required: true
+        schema: *id008
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestionReturnInput'
+  /api/v1/allocations/{id}/eta:
+    post:
+      summary: 'Assigned warehouse: set allocation ETA. Missing/past/outside-horizon
+        ETA excluded.'
+      parameters:
+      - $ref: '#/components/parameters/Origin'
+      - $ref: '#/components/parameters/CSRF'
+      - $ref: '#/components/parameters/Idempotency'
+      - in: path
+        name: id
+        required: true
+        schema: *id008
+      responses:
+        '201':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProcurementETAInput'
+  /api/v1/suggestions:
+    get:
+      summary: Published versioned results; q=run ID (default latest); keyset scoped
+        to actor/location/run. Missing calculation is empty, not a successful zero
+        recommendation.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/reports/critical:
+    get:
+      summary: Effective stock below configured minimum; same published run and explicit
+        stale flag.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/reports/expiry:
+    get:
+      summary: Near expiry <=30 days inclusive; physical and quarantine separate;
+        expired retained.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/reports/finance:
+    get:
+      summary: Daily branch gross/refund/patient/institution/net, refunds attributed
+        to original sale day; accountant chain, manager/pharmacist assigned branch.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/reports/transfer-differences:
+    get:
+      summary: Transfer damaged/missing closure lines; source/target scope only.
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/reports/reconciliation:
+    get:
+      summary: 'Assigned location: actual balance versus full append-only ledger by
+        lot/account; no historical row excluded.'
+      parameters:
+      - name: location_id
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[1-9][0-9]*$
+      - name: q
+        in: query
+        schema:
+          type: string
+      - name: cursor
+        in: query
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      responses:
+        '200':
+          description: Kesin sonuc; bigint miktar/kimlikler ondalik metin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page'
+        '400':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Standart error/code/message;409 durum/miktar/idempotency,422
+            is kurali.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: eczanet_session
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      schema:
+        type: string
+      example: http://localhost:8080
+    CSRF:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema:
+        type: string
+    Idempotency:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  schemas:
+    CSRF:
+      type: object
+      required:
+      - csrf_token
+      properties:
+        csrf_token:
+          type: string
+    User:
+      type: object
+      required:
+      - id
+      - email
+      - role
+      properties:
+        id:
+          type: string
+          description: bigint kimlik metin olarak tasinir
+        email:
+          type: string
+        role:
+          type: string
+          enum:
+          - pharmacist
+          - technician
+          - warehouse
+          - manager
+          - accountant
+          - simulator
+    Location:
+      type: object
+      required:
+      - id
+      - name
+      - kind
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+          enum:
+          - branch
+          - warehouse
+    Error:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          required:
+          - code
+          - message
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+        new_quote:
+          $ref: '#/components/schemas/Quote'
+    Item:
+      type: object
+      additionalProperties: false
+      properties:
+        product_id: *id002
+        quantity: *id002
+        unit:
+          type: string
+          enum:
+          - unit
+          - pack
+          - blister
+      required:
+      - product_id
+      - quantity
+      - unit
+    ReceiptLine:
+      type: object
+      additionalProperties: false
+      properties:
+        product_id: *id002
+        quantity: *id002
+        lot:
+          type: string
+          maxLength: 100
+        expires_on:
+          type: string
+          format: date
+      required:
+      - product_id
+      - quantity
+      - lot
+      - expires_on
+    ProductInput:
+      type: object
+      additionalProperties: false
+      properties:
+        barcode: &id009
+          type: string
+          pattern: ^[0-9]{4,40}$
+        name: &id010
+          type: string
+        dose: &id011
+          type: string
+        form: &id012
+          type: string
+        base_unit: &id013
+          type: string
+          enum:
+          - tablet
+          - ml
+          - adet
+        pack_size: &id014
+          type: string
+        blister_size: &id015
+          type: string
+        sale_multiple: &id016
+          type: string
+        controlled_group: &id017
+          type: string
+        pack_price: &id018
+          type: string
+        ingredients: &id019
+          type: array
+          minItems: 1
+          items: *id001
+        prescription_required: &id020
+          type: boolean
+      required:
+      - barcode
+      - name
+      - dose
+      - form
+      - base_unit
+      - pack_size
+      - blister_size
+      - sale_multiple
+      - ingredients
+    Product:
+      type: object
+      additionalProperties: false
+      properties:
+        barcode: *id009
+        name: *id010
+        dose: *id011
+        form: *id012
+        base_unit: *id013
+        pack_size: *id014
+        blister_size: *id015
+        sale_multiple: *id016
+        controlled_group: *id017
+        pack_price: *id018
+        ingredients: *id019
+        prescription_required: *id020
+        id: *id002
+        active:
+          type: boolean
+      required:
+      - id
+      - barcode
+      - name
+      - dose
+      - form
+      - base_unit
+      - pack_size
+      - blister_size
+      - sale_multiple
+      - ingredients
+      - active
+    LocationCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id002
+      required:
+      - location_id
+    CreateProduct:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id002
+        product:
+          $ref: '#/components/schemas/ProductInput'
+      required:
+      - location_id
+      - product
+    CreateReceipt:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id002
+        supplier_id: *id002
+        document_no:
+          type: string
+          maxLength: 100
+        reason:
+          type: string
+          maxLength: 500
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ReceiptLine'
+        order_id: *id007
+        receipt_mode:
+          type: string
+          enum:
+          - quarantine
+      required:
+      - location_id
+      - supplier_id
+      - document_no
+      - reason
+      - lines
+    CreateTransfer:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id002
+        target_id: *id002
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Item'
+        allocation_id: *id007
+      required:
+      - location_id
+      - target_id
+      - items
+    QuoteInput:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id002
+        items: &id022
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/Item'
+        prescription_id: *id021
+        dispense:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/DispenseItem'
+      required:
+      - location_id
+      oneOf:
+      - required:
+        - items
+        not:
+          anyOf:
+          - required:
+            - prescription_id
+          - required:
+            - dispense
+      - required:
+        - prescription_id
+        - dispense
+        not:
+          required:
+          - items
+      description: Normal sale uses items. RX sale uses prescription_id + dispense.
+        dispensed_product_id differs from prescribed_product_id on RX line. Totals/effective_at
+        from client are rejected.
+    CreateSale:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id002
+        items: *id022
+        quote: *id001
+        prescription_id: *id021
+        dispense:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/DispenseItem'
+        payment_method:
+          type: string
+          enum:
+          - cash
+          - card
+          default: cash
+          description: Demo collection label only; no payment integration
+      required:
+      - location_id
+      - quote
+      oneOf:
+      - required:
+        - items
+        not:
+          anyOf:
+          - required:
+            - prescription_id
+          - required:
+            - dispense
+      - required:
+        - prescription_id
+        - dispense
+        not:
+          required:
+          - items
+      description: Normal sale uses items. RX sale uses prescription_id + dispense.
+        dispensed_product_id differs from prescribed_product_id on RX line. Totals/effective_at
+        from client are rejected.
+    Page:
+      type: object
+      required:
+      - items
+      - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+        next_cursor: *id001
+    DocumentResult:
+      type: object
+      properties:
+        id: *id001
+        status: *id001
+    PricedLine:
+      type: object
+      properties:
+        product_id: *id001
+        quantity: *id001
+        pack_size: *id001
+        blister_size: *id001
+        base_unit: *id001
+        price_id: *id001
+        pack_price: *id001
+        total: *id001
+        allocations:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              lot_id: *id002
+              product_id: *id002
+              quantity: *id002
+            required:
+            - lot_id
+            - product_id
+            - quantity
+        calculation:
+          type: object
+          description: Exact rational intermediates, demo-rx-v1, rates and integer
+            patient/institution totals
+    Quote:
+      type: object
+      properties:
+        quote: *id001
+        total: *id001
+        policy: *id001
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/PricedLine'
+        patient_total: &id023
+          type: string
+        institution_total: *id023
+    Sale:
+      type: object
+      properties:
+        id: *id001
+        total: *id001
+        patient_total: *id023
+        institution_total: *id023
+        effective_at:
+          type: string
+          format: date-time
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/PricedLine'
+        payment_method:
+          type: string
+          enum:
+          - cash
+          - card
+    DispenseItem:
+      type: object
+      additionalProperties: false
+      properties:
+        prescription_line_id: *id021
+        dispensed_product_id: *id021
+        quantity: *id021
+        unit:
+          type: string
+          enum:
+          - unit
+          - pack
+          - blister
+      required:
+      - prescription_line_id
+      - dispensed_product_id
+      - quantity
+      - unit
+    PrescriptionLineInput:
+      type: object
+      additionalProperties: false
+      properties:
+        prescribed_product_id: *id021
+        prescribed_base: *id021
+      required:
+      - prescribed_product_id
+      - prescribed_base
+    PrescriptionInput:
+      type: object
+      additionalProperties: false
+      properties:
+        external_id: *id023
+        patient_external_id: *id023
+        birth_date:
+          type: string
+          format: date
+        issued_at: &id024
+          type: string
+          format: date-time
+        report_from: *id024
+        report_to: *id024
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/PrescriptionLineInput'
+      required:
+      - external_id
+      - patient_external_id
+      - birth_date
+      - issued_at
+      - lines
+    LoadPrescription:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id021
+        prescription:
+          $ref: '#/components/schemas/PrescriptionInput'
+      required:
+      - location_id
+      - prescription
+    SchedulePrice:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id021
+        price:
+          type: object
+          additionalProperties: false
+          properties:
+            product_id: *id021
+            valid_from: *id024
+            pack_price: *id021
+          required:
+          - product_id
+          - valid_from
+          - pack_price
+      required:
+      - location_id
+      - price
+    ReturnInput:
+      type: object
+      additionalProperties: false
+      properties:
+        sale_id: *id006
+        sale_line_id: *id006
+        lot_id: *id006
+        quantity: *id006
+        quote:
+          type: string
+      required:
+      - sale_id
+      - sale_line_id
+      - lot_id
+      - quantity
+    ReturnCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id006
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        return:
+          $ref: '#/components/schemas/ReturnInput'
+      required:
+      - location_id
+      - reason
+      - return
+    DecisionCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id006
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        decision:
+          type: object
+          additionalProperties: false
+          properties:
+            action:
+              type: string
+              enum:
+              - release
+              - destroy
+            quantity: *id006
+            sealed:
+              type: boolean
+          required:
+          - action
+          - quantity
+          - sealed
+      required:
+      - location_id
+      - reason
+      - decision
+    DeliveryLine:
+      type: object
+      additionalProperties: false
+      properties:
+        lot_id: *id006
+        good: &id025
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        damaged: *id025
+        missing: *id025
+      required:
+      - lot_id
+      - good
+      - damaged
+      - missing
+    DeliveryCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id006
+        reason:
+          type: string
+          maxLength: 500
+        delivery:
+          type: object
+          additionalProperties: false
+          properties:
+            final:
+              type: boolean
+            lines:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/DeliveryLine'
+          required:
+          - final
+          - lines
+      required:
+      - location_id
+    CountLine:
+      type: object
+      additionalProperties: false
+      properties:
+        lot_id: *id006
+        account:
+          type: string
+          enum:
+          - physical
+          - quarantine
+        actual: *id025
+      required:
+      - lot_id
+      - account
+      - actual
+    CountCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id006
+        reason:
+          type: string
+          maxLength: 500
+        count:
+          type: object
+          additionalProperties: false
+          properties:
+            product_id: *id006
+            lines:
+              type: array
+              maxItems: 200
+              items:
+                $ref: '#/components/schemas/CountLine'
+          required:
+          - product_id
+      required:
+      - location_id
+      - count
+    ReasonCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id006
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+      required:
+      - location_id
+      - reason
+    NeedCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id007
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        need:
+          type: object
+          additionalProperties: false
+          properties:
+            product_id: *id007
+            quantity: *id007
+          required:
+          - product_id
+          - quantity
+      required:
+      - location_id
+      - reason
+      - need
+    OrderCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id: *id007
+        supplier_id: *id007
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        order:
+          type: object
+          additionalProperties: false
+          properties:
+            lines:
+              type: array
+              minItems: 1
+              maxItems: 100
+              items:
+                type: object
+                additionalProperties: false
+                properties:
+                  product_id: *id007
+                  quantity: *id007
+                  needs:
+                    type: array
+                    maxItems: 100
+                    items: *id007
+                required:
+                - product_id
+                - quantity
+          required:
+          - lines
+      required:
+      - location_id
+      - supplier_id
+      - reason
+      - order
+    SuggestionRunInput:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id:
+          type: string
+          pattern: ^[1-9][0-9]*$
+        as_of:
+          type: string
+          format: date
+      required:
+      - location_id
+      - as_of
+    SuggestionNeedInput:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id:
+          type: string
+          pattern: ^[1-9][0-9]*$
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+      required:
+      - location_id
+      - reason
+    SuggestionReturnInput:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id:
+          type: string
+          pattern: ^[1-9][0-9]*$
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        target_id: *id008
+      required:
+      - location_id
+      - reason
+      - target_id
+    ProcurementETAInput:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id:
+          type: string
+          pattern: ^[1-9][0-9]*$
+        expected_on:
+          type: string
+          format: date
+      required:
+      - location_id
+      - expected_on
+    SuggestionPolicyInput:
+      type: object
+      additionalProperties: false
+      properties:
+        location_id:
+          type: string
+          pattern: ^[1-9][0-9]*$
+        suggestion_policy:
+          type: object
+          additionalProperties: false
+          properties:
+            product_id: *id008
+            version:
+              type: string
+              minLength: 1
+              maxLength: 100
+            lead_days:
+              type: integer
+              minimum: 0
+              maximum: 90
+            review_days:
+              type: integer
+              minimum: 0
+              maximum: 90
+            safety_days:
+              type: integer
+              minimum: 0
+              maximum: 90
+            season:
+              type: string
+              description: Exact decimal (max 4 fractional digits), 0 < season <=
+                100
+            minimum:
+              type: string
+              pattern: ^[0-9]+$
+          required:
+          - product_id
+          - version
+          - lead_days
+          - review_days
+          - safety_days
+          - season
+          - minimum
+      required:
+      - location_id
+      - suggestion_policy
+    SuggestionResult:
+      type: object
+      description: Quantities, money and IDs are decimal strings; rate is exact numeric
+        display. Derived quantities use integer rational capacity, no floats.
+      properties:
+        id:
+          type: string
+        run_id:
+          type: string
+        location_id:
+          type: string
+        product_id:
+          type: string
+        as_of:
+          type: string
+        version:
+          type: string
+        policy_version:
+          type: string
+        gross:
+          type: string
+        returned:
+          type: string
+        rate:
+          type: string
+        minimum:
+          type: string
+        target:
+          type: string
+        physical:
+          type: string
+        risk:
+          type: string
+        effective:
+          type: string
+        pending:
+          type: string
+        excluded_pending:
+          type: string
+        suggested:
+          type: string
+        boxes:
+          type: string
+        return_quantity:
+          type: string
+        stale:
+          type: boolean
+        defaults:
+          type: boolean
+        history_unknown:
+          type: boolean
+        unknown_lot:
+          type: boolean
+  responses:
+    BadRequest:
+      description: 400 INVALID_INPUT
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthenticated:
+      description: 401 UNAUTHENTICATED veya genel INVALID_CREDENTIALS
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 403 FORBIDDEN / CSRF_REJECTED / ORIGIN_REJECTED
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: 429 RATE_LIMITED
+      headers:
+        Retry-After:
+          schema:
+            type: string
+          description: Login limiti 900 saniye; prelogin kapasitesi dolunca header
+            zorunlu degil
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unavailable:
+      description: 503 UNAVAILABLE; DB/DSN hata ayrintisi donmez
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
