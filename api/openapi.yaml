@@ -432,6 +432,11 @@ paths:
       - name: cursor
         in: query
         schema: *id001
+      - name: q
+        in: query
+        description: Ürün adı, barkod veya lot; hareketlerde ayrıca tür veya referans
+        schema:
+          type: string
       - name: location_id
         in: query
         required: true
@@ -499,6 +504,11 @@ paths:
       - name: cursor
         in: query
         schema: *id001
+      - name: q
+        in: query
+        description: Ürün adı, barkod veya lot; hareketlerde ayrıca tür veya referans
+        schema:
+          type: string
       - name: location_id
         in: query
         required: true
